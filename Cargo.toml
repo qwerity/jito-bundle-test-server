@@ -6,6 +6,9 @@ edition = "2021"
 [[bin]]
 name = "bundlesvr"
 
+[[bin]]
+name = "bundle_client"
+
 [dependencies]
 tonic = { version = "0.12" }
 prost = "0.13.5"
