@@ -17,3 +17,5 @@ target/
 .idea/
 
 id.json
+jito_be.json
+jito_validator.json

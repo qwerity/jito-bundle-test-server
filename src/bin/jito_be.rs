@@ -18,22 +18,22 @@ use bundle_test_server::{
     }
 };
 
-use uuid::Uuid;
+use clap::Parser;
 use futures::stream;
 use futures_util::stream::Stream;
 use rand::{Rng, rng};
-use std::pin::Pin;
-use tonic::{transport::Server, Request, Response, Status};
-use solana_system_interface::instruction as system_instruction;
-use solana_sdk::transaction::Transaction;
-use solana_sdk::compute_budget::ComputeBudgetInstruction;
-use std::time::Duration as StdDuration;
-use solana_sdk::signature::Signer;
-use clap::Parser;
+use solana_compute_budget_interface::ComputeBudgetInstruction;
+use solana_keypair::{Pubkey, Signer};
 use solana_sdk::instruction::Instruction;
-use spl_memo::id as memo_program_id;
-use std::sync::atomic::{AtomicU64, Ordering};
+use solana_sdk::transaction::Transaction;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration as StdDuration;
+use tonic::{transport::Server, Request, Response, Status};
+use tracing::{info, error, debug};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
+use uuid::Uuid;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -41,17 +41,17 @@ pub struct Args {
     // #[arg(long, default_value = "http://127.0.0.1:8899")]
     #[arg(long, default_value = "https://api.testnet.solana.com")]
     rpc_url: String,
-    #[arg(long, default_value = "id.json")]
+    #[arg(long, default_value = "jito_be.json")]
     keypair_path: String,
     #[arg(long, default_value = "127.0.0.1")]
     bind_ip: String,
-    #[arg(long, default_value = "31001")]
+    #[arg(long, default_value = "41001")]
     bind_port: u16,
     #[arg(long, default_value = "1000")]
     blockhash_update_interval_ms: u64,
-    #[arg(long, default_value = "50")]
+    #[arg(long, default_value = "1000")]
     packets_generation_interval_ms: u64,
-    #[arg(long, default_value = "50")]
+    #[arg(long, default_value = "1000")]
     bundle_generation_interval_ms: u64,
     #[arg(long, default_value = "1400000")]
     compute_unit_limit: u32,
@@ -61,6 +61,10 @@ pub struct Args {
     disable_packets_subscription: bool,
     #[arg(long, default_value_t = false)]
     disable_bundles_subscription: bool,
+    #[arg(long, default_value_t = false)]
+    skip_blockhash_fetching: bool,
+    #[arg(long, default_value = "info")]
+    log_level: String,
 }
 
 #[derive(Clone)]
@@ -74,21 +78,13 @@ pub struct BlockEngineValidatorService {
 impl BlockEngineValidatorService {
     pub async fn new(args: Args) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let keypair = KeypairManager::load_from_file(&args.keypair_path).await?;
-        log::info!("Using keypair with public key: {}", keypair.get_public_key());
+        info!("Using keypair with public key: {}", keypair.get_public_key());
 
-        let blockhash_fetcher = SolanaBlockhashFetcher::new(args.rpc_url.clone());
-        blockhash_fetcher.update_blockhash().await?;
-
-        let fetcher_clone = blockhash_fetcher.clone();
-        let blockhash_update_interval_ms = args.blockhash_update_interval_ms;
-        tokio::spawn(async move {
-            loop {
-                if let Err(e) = fetcher_clone.update_blockhash().await {
-                    log::warn!("Error updating blockhash: {}", e);
-                }
-                tokio::time::sleep(StdDuration::from_millis(blockhash_update_interval_ms)).await;
-            }
-        });
+        let blockhash_fetcher = SolanaBlockhashFetcher::new(
+            args.rpc_url.clone(),
+            args.skip_blockhash_fetching,
+            args.blockhash_update_interval_ms
+        ).await?;
 
         Ok(Self {
             blockhash_fetcher,
@@ -116,7 +112,7 @@ impl BlockEngineValidatorService {
             amounts.push(amount);
         }
 
-        log::debug!("Created bundle with {} real transactions with amounts: {:?}", tx_count, amounts);
+        debug!("Created bundle with {} real transactions with amounts: {:?}", tx_count, amounts);
         Ok(Bundle {
             header: None,
             packets
@@ -129,11 +125,11 @@ impl BlockEngineValidatorService {
             ComputeBudgetInstruction::set_compute_unit_limit(self.args.compute_unit_limit),
             ComputeBudgetInstruction::set_compute_unit_price(self.args.compute_unit_price.into()),
             Instruction {
-                program_id: memo_program_id(),
+                program_id: Pubkey::from(spl_memo::ID.to_bytes()),
                 accounts: vec![],
                 data: format!("Transfer {} lamports", amount_lamports).into_bytes(),
             },
-            system_instruction::transfer(
+            solana_system_interface::instruction::transfer(
                 &self.keypair.keypair.pubkey(),
                 &self.keypair.keypair.pubkey(),
                 amount_lamports
@@ -148,7 +144,7 @@ impl BlockEngineValidatorService {
         );
 
         let serialized_tx = bincode::serialize(&transaction)?;
-        log::debug!("Created transaction of {} bytes transferring {} lamports with blockhash: {}",
+        debug!("Created transaction of {} bytes transferring {} lamports with blockhash: {}",
              serialized_tx.len(), amount_lamports, recent_blockhash);
         Ok(serialized_tx)
     }
@@ -166,7 +162,7 @@ impl BlockEngineValidator for BlockEngineValidatorService {
         _request: Request<SubscribePacketsRequest>,
     ) -> Result<Response<Self::SubscribePacketsStream>, Status> {
         if self.args.disable_packets_subscription {
-            log::info!("Packet subscription is disabled");
+            info!("Packet subscription is disabled");
             return Ok(Response::new(Box::pin(stream::empty())));
         }
 
@@ -180,8 +176,9 @@ impl BlockEngineValidator for BlockEngineValidatorService {
                 interval.tick().await;
 
                 let blockhash = service.blockhash_fetcher.get_blockhash();
+
                 if blockhash.is_empty() {
-                    log::error!("No blockhash available for packet creation");
+                    error!("No blockhash available for packet creation");
                     let _ = tx.send(Err(Status::internal("No blockhash available")));
                     continue;
                 }
@@ -204,9 +201,9 @@ impl BlockEngineValidator for BlockEngineValidatorService {
                             amounts.push(amount);
                         },
                         Err(e) => {
-                            log::error!("Failed to create packet: {}", e);
+                            error!("Failed to create packet: {}", e);
                             if tx.send(Err(Status::internal(format!("Failed to create packet: {}", e)))).is_err() {
-                                log::debug!("Packet client disconnected while sending error, stopping task");
+                                debug!("Packet client disconnected while sending error, stopping task");
                                 break;
                             }
                             continue;
@@ -218,7 +215,7 @@ impl BlockEngineValidator for BlockEngineValidatorService {
                     let batch = PacketBatch { packets };
                     let hash = calculate_packet_batch_hash(&batch);
 
-                    log::info!("Generated packet batch {} with {} packets (amounts: {:?})", hash, batch.packets.len(), amounts);
+                    info!("Generated packet batch {} with {} packets (amounts: {:?})", hash, batch.packets.len(), amounts);
 
                     let response = SubscribePacketsResponse {
                         header: None,
@@ -226,7 +223,7 @@ impl BlockEngineValidator for BlockEngineValidatorService {
                     };
 
                     if tx.send(Ok(response)).is_err() {
-                        log::debug!("Packet client disconnected, stopping packet generation task");
+                        debug!("Packet client disconnected, stopping packet generation task");
                         break;
                     }
                 }
@@ -244,7 +241,7 @@ impl BlockEngineValidator for BlockEngineValidatorService {
         _request: Request<SubscribeBundlesRequest>,
     ) -> Result<Response<Self::SubscribeBundlesStream>, Status> {
         if self.args.disable_bundles_subscription {
-            log::info!("Bundles subscription is disabled");
+            info!("Bundles subscription is disabled");
             return Ok(Response::new(Box::pin(stream::empty())));
         }
 
@@ -263,7 +260,7 @@ impl BlockEngineValidator for BlockEngineValidatorService {
                         let bundle_hash = calculate_bundle_hash(&bundle);
                         let uuid = Uuid::new_v4().to_string();
 
-                        log::info!("|-> Bundle #{}|{}|{}|{} packets|", bundle_count, uuid, bundle_hash, bundle.packets.len());
+                        info!("|-> Bundle #{}|{}|{}|{} packets|", bundle_count, uuid, bundle_hash, bundle.packets.len());
 
                         let response = SubscribeBundlesResponse {
                             bundles: vec![
@@ -275,14 +272,14 @@ impl BlockEngineValidator for BlockEngineValidatorService {
                         };
 
                         if tx.send(Ok(response)).is_err() {
-                            log::debug!("Bundle client disconnected, stopping bundle generation task");
+                            debug!("Bundle client disconnected, stopping bundle generation task");
                             break;
                         }
                     },
                     Err(e) => {
-                        log::error!("Failed to create bundle: {}", e);
+                        error!("Failed to create bundle: {}", e);
                         if tx.send(Err(Status::internal(format!("Failed to create bundle: {}", e)))).is_err() {
-                            log::debug!("Bundle client disconnected while sending error, stopping task");
+                            debug!("Bundle client disconnected while sending error, stopping task");
                             break;
                         }
                     }
@@ -309,10 +306,14 @@ impl BlockEngineValidator for BlockEngineValidatorService {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    env_logger::init();
     let args = Args::parse();
+
+    FmtSubscriber::builder()
+        .with_env_filter(EnvFilter::new(&args.log_level))
+        .init();
+
     let be_server_addr = format!("{}:{}", args.bind_ip, args.bind_port).parse()?;
-    log::info!("Block Engine Validator Server listening on {}", be_server_addr);
+    info!("Block Engine Validator Server listening on {}", be_server_addr);
 
     let validator_service = BlockEngineValidatorService::new(args).await?;
     Server::builder()

@@ -16,12 +16,14 @@ use bundle_test_server::{
 };
 
 use clap::Parser;
-use tonic::{transport::Channel, Request, Code};
-use tonic::metadata::MetadataValue;
-use solana_sdk::signature::Signer;
 use futures_util::StreamExt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use solana_keypair::Signer;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tonic::metadata::MetadataValue;
+use tonic::{transport::Channel, Request, Code};
+use tracing::{info, warn, error, debug};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -30,12 +32,14 @@ pub struct Args {
     bind_ip: String,
     #[arg(long, default_value = "21001")]
     bind_port: u16,
-    #[arg(long, default_value = "id.json")]
+    #[arg(long, default_value = "jito_validator.json")]
     keypair_path: String,
     #[arg(long, default_value_t = false)]
     disable_packets_subscription: bool,
     #[arg(long, default_value_t = false)]
     disable_bundles_subscription: bool,
+    #[arg(long, default_value = "info")]
+    log_level: String,
 }
 
 pub struct BundleClient {
@@ -49,7 +53,7 @@ pub struct BundleClient {
 impl BundleClient {
     pub async fn new(server_addr: String, keypair_path: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let keypair = KeypairManager::load_from_file(&keypair_path).await?;
-        log::info!("Client using keypair with public key: {}", keypair.get_public_key());
+        info!("Client using keypair with public key: {}", keypair.get_public_key());
 
         let (auth_client, block_engine_client) = Self::create_clients(&server_addr).await?;
 
@@ -67,19 +71,19 @@ impl BundleClient {
         let max_retries = 60;
 
         for attempt in 1..=max_retries {
-            log::info!("Attempting to connect to server {} (attempt {}/{})", server_addr, attempt, max_retries);
+            info!("Attempting to connect to server {} (attempt {}/{})", server_addr, attempt, max_retries);
 
             match Channel::from_shared(uri.clone())?.connect().await {
                 Ok(channel) => {
-                    log::info!("Successfully connected to server on attempt {}", attempt);
+                    info!("Successfully connected to server on attempt {}", attempt);
                     let auth_client = AuthServiceClient::new(channel.clone());
                     let block_engine_client = BlockEngineValidatorClient::new(channel);
                     return Ok((auth_client, block_engine_client));
                 },
                 Err(e) => {
-                    log::warn!("Failed to connect on attempt {}: {}", attempt, e);
+                    warn!("Failed to connect on attempt {}: {}", attempt, e);
                     if attempt < max_retries {
-                        log::info!("Retrying in {} seconds...", 3);
+                        info!("Retrying in {} seconds...", 3);
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     } else {
                         return Err(format!("Failed to connect after {} attempts: {}", max_retries, e).into());
@@ -92,7 +96,7 @@ impl BundleClient {
     }
 
     async fn reconnect(&mut self, server_addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        log::info!("Reconnecting to server...");
+        info!("Reconnecting to server...");
         let (auth_client, block_engine_client) = Self::create_clients(server_addr).await?;
         self.auth_client = auth_client;
         self.block_engine_client = block_engine_client;
@@ -103,17 +107,17 @@ impl BundleClient {
         let max_auth_retries = 60;
 
         for attempt in 1..=max_auth_retries {
-            log::info!("Starting authentication process (attempt {}/{})...", attempt, max_auth_retries);
+            info!("Starting authentication process (attempt {}/{})...", attempt, max_auth_retries);
 
             match self.try_authenticate().await {
                 Ok(()) => {
-                    log::info!("Authentication successful on attempt {}", attempt);
+                    info!("Authentication successful on attempt {}", attempt);
                     return Ok(());
                 },
                 Err(e) => {
-                    log::warn!("Authentication failed on attempt {}: {}", attempt, e);
+                    warn!("Authentication failed on attempt {}: {}", attempt, e);
                     if attempt < max_auth_retries {
-                        log::info!("Retrying authentication in {} seconds...", 3);
+                        info!("Retrying authentication in {} seconds...", 3);
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     } else {
                         return Err(format!("Authentication failed after {} attempts: {}", max_auth_retries, e).into());
@@ -136,7 +140,7 @@ impl BundleClient {
             .await?;
 
         let challenge = challenge_response.into_inner().challenge;
-        log::debug!("Received challenge: {}", challenge);
+        debug!("Received challenge: {}", challenge);
 
         let message_to_sign = format!("{}{}", self.keypair.get_public_key(), challenge);
         let signature = self.keypair.keypair.sign_message(message_to_sign.as_bytes());
@@ -163,20 +167,20 @@ impl BundleClient {
 
         loop {
             if self.access_token.is_none() {
-                log::info!("No access token, attempting to authenticate...");
+                info!("No access token, attempting to authenticate...");
                 if let Err(e) = self.authenticate().await {
-                    log::error!("Authentication failed: {}", e);
+                    error!("Authentication failed: {}", e);
                     reconnect_attempt += 1;
                     if reconnect_attempt >= max_reconnect_attempts {
                         return Err(format!("Failed to authenticate after {} attempts", max_reconnect_attempts).into());
                     }
-                    log::info!("Retrying authentication in 3 seconds...");
+                    info!("Retrying authentication in 3 seconds...");
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }
             }
 
-            log::info!("Subscribing to bundles...");
+            info!("Subscribing to bundles...");
 
             let mut request = Request::new(SubscribeBundlesRequest {});
 
@@ -190,7 +194,7 @@ impl BundleClient {
                     let mut stream = response.into_inner();
                     let bundle_counter = self.bundle_counter.clone();
 
-                    log::info!("Successfully subscribed to bundles stream");
+                    info!("Successfully subscribed to bundles stream");
                     reconnect_attempt = 0;
 
                     while let Some(bundle_response) = stream.next().await {
@@ -201,15 +205,15 @@ impl BundleClient {
                                         let count = bundle_counter.fetch_add(1, Ordering::SeqCst) + 1;
                                         let hash = calculate_bundle_hash(&bundle);
 
-                                        log::info!("|<- Bundle #{}|{}|{}|{} packets|",
+                                        info!("|<- Bundle #{}|{}|{}|{} packets|",
                                             count, bundle_uuid.uuid, hash, bundle.packets.len());
                                     }
                                 }
                             },
                             Err(e) => {
-                                log::error!("Error receiving bundle: {}", e);
+                                error!("Error receiving bundle: {}", e);
                                 if e.code() == Code::Unauthenticated {
-                                    log::warn!("Authentication error, clearing token");
+                                    warn!("Authentication error, clearing token");
                                     self.access_token = None;
                                 }
                                 break;
@@ -217,12 +221,12 @@ impl BundleClient {
                         }
                     }
 
-                    log::warn!("Bundle stream ended, attempting to reconnect...");
+                    warn!("Bundle stream ended, attempting to reconnect...");
                 },
                 Err(e) => {
-                    log::error!("Failed to subscribe to bundles: {}", e);
+                    error!("Failed to subscribe to bundles: {}", e);
                     if e.code() == Code::Unauthenticated {
-                        log::warn!("Authentication error, clearing token");
+                        warn!("Authentication error, clearing token");
                         self.access_token = None;
                     }
                 }
@@ -233,11 +237,11 @@ impl BundleClient {
                 return Err(format!("Failed to reconnect after {} attempts", max_reconnect_attempts).into());
             }
 
-            log::info!("Reconnection attempt {}/{} in 5 seconds...", reconnect_attempt, max_reconnect_attempts);
+            info!("Reconnection attempt {}/{} in 5 seconds...", reconnect_attempt, max_reconnect_attempts);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
             if let Err(e) = self.reconnect(&server_addr).await {
-                log::error!("Failed to reconnect: {}", e);
+                error!("Failed to reconnect: {}", e);
                 continue;
             }
         }
@@ -250,20 +254,20 @@ impl BundleClient {
 
         loop {
             if self.access_token.is_none() {
-                log::info!("No access token, attempting to authenticate...");
+                info!("No access token, attempting to authenticate...");
                 if let Err(e) = self.authenticate().await {
-                    log::error!("Authentication failed: {}", e);
+                    error!("Authentication failed: {}", e);
                     reconnect_attempt += 1;
                     if reconnect_attempt >= max_reconnect_attempts {
                         return Err(format!("Failed to authenticate after {} attempts", max_reconnect_attempts).into());
                     }
-                    log::info!("Retrying authentication in 3 seconds...");
+                    info!("Retrying authentication in 3 seconds...");
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }
             }
 
-            log::info!("Subscribing to packets...");
+            info!("Subscribing to packets...");
 
             let mut request = Request::new(SubscribePacketsRequest {});
 
@@ -276,7 +280,7 @@ impl BundleClient {
                 Ok(response) => {
                     let mut stream = response.into_inner();
 
-                    log::info!("Successfully subscribed to packets stream");
+                    info!("Successfully subscribed to packets stream");
                     reconnect_attempt = 0;
 
                     while let Some(packet_response) = stream.next().await {
@@ -285,14 +289,14 @@ impl BundleClient {
                                 if let Some(batch) = response.batch {
                                     let hash = calculate_packet_batch_hash(&batch);
                                     packet_counter += batch.packets.len() as u64;
-                                    log::info!("Received packet batch {} with {} packets (total received: {})",
+                                    info!("Received packet batch {} with {} packets (total received: {})",
                                         hash, batch.packets.len(), packet_counter);
                                 }
                             },
                             Err(e) => {
-                                log::error!("Error receiving packet: {}", e);
+                                error!("Error receiving packet: {}", e);
                                 if e.code() == Code::Unauthenticated {
-                                    log::warn!("Authentication error, clearing token");
+                                    warn!("Authentication error, clearing token");
                                     self.access_token = None;
                                 }
                                 break;
@@ -300,12 +304,12 @@ impl BundleClient {
                         }
                     }
 
-                    log::warn!("Packet stream ended, attempting to reconnect...");
+                    warn!("Packet stream ended, attempting to reconnect...");
                 },
                 Err(e) => {
-                    log::error!("Failed to subscribe to packets: {}", e);
+                    error!("Failed to subscribe to packets: {}", e);
                     if e.code() == Code::Unauthenticated {
-                        log::warn!("Authentication error, clearing token");
+                        warn!("Authentication error, clearing token");
                         self.access_token = None;
                     }
                 }
@@ -316,11 +320,11 @@ impl BundleClient {
                 return Err(format!("Failed to reconnect after {} attempts", max_reconnect_attempts).into());
             }
 
-            log::info!("Reconnection attempt {}/{} in 5 seconds...", reconnect_attempt, max_reconnect_attempts);
+            info!("Reconnection attempt {}/{} in 5 seconds...", reconnect_attempt, max_reconnect_attempts);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
             if let Err(e) = self.reconnect(&server_addr).await {
-                log::error!("Failed to reconnect: {}", e);
+                error!("Failed to reconnect: {}", e);
                 continue;
             }
         }
@@ -329,12 +333,15 @@ impl BundleClient {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    env_logger::init();
     let args = Args::parse();
 
-    log::info!("Bundle Client starting...");
+    FmtSubscriber::builder()
+        .with_env_filter(EnvFilter::new(&args.log_level))
+        .init();
+
+    info!("Bundle Client starting...");
     let server_addr = format!("{}:{}", args.bind_ip, args.bind_port);
-    log::info!("Connecting to server at: {}", server_addr);
+    info!("Connecting to server at: {}", server_addr);
 
     let mut client = BundleClient::new(server_addr.clone(), args.keypair_path.clone()).await?;
     client.authenticate().await?;
@@ -352,10 +359,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 Ok(mut client_clone) => {
                     client_clone.access_token = access_token;
                     if let Err(e) = client_clone.subscribe_to_bundles(server_addr_clone).await {
-                        log::error!("Bundle subscription error: {}", e);
+                        error!("Bundle subscription error: {}", e);
                     }
                 },
-                Err(e) => log::error!("Failed to create bundle client: {}", e),
+                Err(e) => error!("Failed to create bundle client: {}", e),
             }
         }));
     }
@@ -370,10 +377,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 Ok(mut client_clone) => {
                     client_clone.access_token = access_token;
                     if let Err(e) = client_clone.subscribe_to_packets(server_addr_clone).await {
-                        log::error!("Packet subscription error: {}", e);
+                        error!("Packet subscription error: {}", e);
                     }
                 },
-                Err(e) => log::error!("Failed to create packet client: {}", e),
+                Err(e) => error!("Failed to create packet client: {}", e),
             }
         }));
     }

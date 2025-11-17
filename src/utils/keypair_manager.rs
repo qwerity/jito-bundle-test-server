@@ -1,5 +1,5 @@
+use solana_keypair::{Signer, Keypair, read_keypair_file};
 use std::sync::Arc;
-use solana_sdk::signature::{Keypair, Signer, read_keypair_file};
 
 #[derive(Clone)]
 pub struct KeypairManager {
@@ -22,4 +22,4 @@ impl KeypairManager {
     pub fn get_public_key(&self) -> String {
         self.pubkey_str.clone()
     }
-} 
+}
