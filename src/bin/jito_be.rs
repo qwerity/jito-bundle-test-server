@@ -2,7 +2,7 @@ use bundle_test_server::{
     utils::{
         solana_blockhash_fetcher::SolanaBlockhashFetcher,
         keypair_manager::KeypairManager,
-        auth::Auth,
+        auth::AuthServiceImpl,
         hash_utils::{calculate_bundle_hash, calculate_packet_batch_hash}
     },
     proto::{
@@ -17,7 +17,6 @@ use bundle_test_server::{
         packet::{Packet, PacketBatch}
     }
 };
-
 use clap::Parser;
 use futures::stream;
 use futures_util::stream::Stream;
@@ -32,7 +31,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration as StdDuration;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, error, debug};
-use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use uuid::Uuid;
 
 #[derive(Parser, Debug, Clone)]
@@ -45,7 +43,7 @@ pub struct Args {
     keypair_path: String,
     #[arg(long, default_value = "127.0.0.1")]
     bind_ip: String,
-    #[arg(long, default_value = "41001")]
+    #[arg(long, default_value = "31001")]
     bind_port: u16,
     #[arg(long, default_value = "1000")]
     blockhash_update_interval_ms: u64,
@@ -308,8 +306,8 @@ impl BlockEngineValidator for BlockEngineValidatorService {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
 
-    FmtSubscriber::builder()
-        .with_env_filter(EnvFilter::new(&args.log_level))
+    tracing_subscriber::fmt()
+        .with_env_filter(format!("jito_be={}", args.log_level))
         .init();
 
     let be_server_addr = format!("{}:{}", args.bind_ip, args.bind_port).parse()?;
@@ -320,7 +318,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .http2_keepalive_interval(Some(StdDuration::from_secs(30)))
         .http2_keepalive_timeout(Some(StdDuration::from_secs(5)))
         .add_service(BlockEngineValidatorServer::new(validator_service))
-        .add_service(AuthServiceServer::new(Auth))
+        .add_service(AuthServiceServer::new(AuthServiceImpl))
         .serve(be_server_addr)
         .await?;
     Ok(())

@@ -14,7 +14,6 @@ use bundle_test_server::{
         },
     }
 };
-
 use clap::Parser;
 use futures_util::StreamExt;
 use solana_keypair::Signer;
@@ -23,7 +22,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tonic::metadata::MetadataValue;
 use tonic::{transport::Channel, Request, Code};
 use tracing::{info, warn, error, debug};
-use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -335,9 +333,10 @@ impl BundleClient {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
 
-    FmtSubscriber::builder()
-        .with_env_filter(EnvFilter::new(&args.log_level))
+    tracing_subscriber::fmt()
+        .with_env_filter(format!("jito_validator={}", args.log_level))
         .init();
+
 
     info!("Bundle Client starting...");
     let server_addr = format!("{}:{}", args.bind_ip, args.bind_port);

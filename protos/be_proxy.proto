@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+import "bundle.proto";
+import "shared.proto";
+
+package be_proxy;
+
+// Request message for sending a bundle through the BE proxy
+message SendBundleRequest {
+  bundle.BundleUuid bundle_uuid = 1;
+}
+
+// Response message after sending a bundle
+message SendBundleResponse {
+  bool success = 1;
+  string error_message = 2;
+  bundle.BundleUuid bundle_uuid = 3;
+}
+
+// Request message for subscribing to bundle results
+message SubscribeBundleResultsRequest {}
+
+// Service definition for BE proxy bundle operations
+service BeProxyBundleService {
+  // Subscribe to bundle UUIDs from the BE proxy
+  rpc SubscribeBundleResults(SubscribeBundleResultsRequest) returns (stream bundle.BundleUuid);
+
+  // Send a bundle through the BE proxy
+  rpc SendBundle(SendBundleRequest) returns (SendBundleResponse);
+}

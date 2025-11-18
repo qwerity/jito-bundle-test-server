@@ -10,9 +10,9 @@ name = "jito_be"
 name = "jito_validator"
 
 [dependencies]
+anyhow = "1"
 bincode = "1.3.3"
 bs58 = "0.5"
-chrono = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 futures = "0.3"
 futures-util = "0.3"
