@@ -50,8 +50,7 @@ pub struct BundleClient {
 
 impl BundleClient {
     pub async fn new(server_addr: String, keypair_path: String) -> Result<Self, anyhow::Error> {
-        let keypair = read_keypair_file(&keypair_path)
-            .map_err(|e| anyhow!("{}: {e}", self.config.shiroi_block_engines.keypair_path))?;
+        let keypair = read_keypair_file(&keypair_path).map_err(|e| anyhow!("{}: {e}", args.keypair_path))?;
         info!("Client using keypair with public key: {}", keypair.pubkey());
 
         let (auth_client, block_engine_client) = Self::create_clients(&server_addr).await?;

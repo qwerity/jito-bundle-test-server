@@ -76,8 +76,7 @@ pub struct BlockEngineValidatorService {
 
 impl BlockEngineValidatorService {
     pub async fn new(args: Args) -> Result<Self, anyhow::Error> {
-        let keypair = read_keypair_file(&args.keypair_path)
-            .map_err(|e| anyhow!("{}: {e}", self.config.shiroi_block_engines.keypair_path))?;
+        let keypair = read_keypair_file(&args.keypair_path).map_err(|e| anyhow!("{}: {e}", args.keypair_path))?;
         info!("Using keypair with public key: {}", keypair.pubkey());
 
         let blockhash_fetcher = SolanaBlockhashFetcher::new(
