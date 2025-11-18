@@ -5,7 +5,7 @@ use bundle_test_server::{
             be_proxy_bundle_service_server::{BeProxyBundleService, BeProxyBundleServiceServer},
             SendBundleRequest, SendBundleResponse, SubscribeBundleResultsRequest
         },
-        bundle::{Bundle, BundleUuid},
+        bundle::BundleUuid,
     },
     utils::{
         auth::{AuthServiceImpl, AuthInterceptor}
@@ -13,7 +13,6 @@ use bundle_test_server::{
 };
 use anyhow::Result;
 use clap::Parser;
-use std::hash::{Hash, Hasher, DefaultHasher};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +21,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
+use bundle_test_server::utils::hash_utils::calculate_bundle_hash;
 
 // Global counter for received bundles
 static BUNDLE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -52,38 +52,6 @@ impl BeProxyServiceImpl {
         })
     }
 
-    /// Calculate a deterministic hash for the bundle for verification purposes
-    fn calculate_bundle_hash(bundle: &Bundle) -> String {
-        let mut hasher = DefaultHasher::new();
-
-        // Hash the number of packets
-        bundle.packets.len().hash(&mut hasher);
-
-        // Hash each packet's data
-        for (index, packet) in bundle.packets.iter().enumerate() {
-            index.hash(&mut hasher);
-            packet.data.hash(&mut hasher);
-
-            // Hash packet metadata if available
-            if let Some(meta) = &packet.meta {
-                meta.size.hash(&mut hasher);
-                meta.addr.hash(&mut hasher);
-                meta.port.hash(&mut hasher);
-            }
-        }
-
-        // Hash bundle header timestamp if available
-        if let Some(header) = &bundle.header {
-            if let Some(ts) = &header.ts {
-                ts.seconds.hash(&mut hasher);
-                ts.nanos.hash(&mut hasher);
-            }
-        }
-
-        // Return hash as hex string
-        format!("{:016x}", hasher.finish())
-    }
-
     /// Remove one transaction (packet) from the bundle and return the modified bundle
     fn remove_one_transaction(bundle_uuid: BundleUuid, addr_str: &str) -> BundleUuid {
         let mut modified_bundle_uuid = bundle_uuid;
@@ -104,7 +72,7 @@ impl BeProxyServiceImpl {
 
         // Calculate hash of the bundle for logging
         let bundle_hash = if let Some(ref bundle) = bundle_uuid.bundle {
-            Self::calculate_bundle_hash(bundle)
+            calculate_bundle_hash(bundle)
         } else {
             "no_bundle".to_string()
         };
@@ -199,7 +167,7 @@ impl BeProxyBundleService for BeProxyServiceImpl {
 
             if let Some(bundle) = &bundle_uuid.bundle {
                 // Calculate bundle hash using custom hash function
-                let bundle_hash = Self::calculate_bundle_hash(bundle);
+                let bundle_hash = calculate_bundle_hash(bundle);
 
                 info!("📦 |Bundle <- #{}|{}|{}|{} packets|",
                       bundle_number,
@@ -227,7 +195,7 @@ impl BeProxyBundleService for BeProxyServiceImpl {
 
                 // Log the modified bundle info
                 if let Some(ref modified_bundle) = modified_bundle_uuid.bundle {
-                    let modified_hash = Self::calculate_bundle_hash(modified_bundle);
+                    let modified_hash = calculate_bundle_hash(modified_bundle);
                     info!("🔧 |Bundle -> #{}|{}|{}|{} packets|",
                           bundle_number,
                           modified_bundle_uuid.uuid,
@@ -287,7 +255,7 @@ async fn main() -> Result<()> {
         .with_env_filter(format!("shiroi_be={}", args.log_level))
         .init();
 
-    info!("🚀 Starting Jito Block Engine Server with BeProxyBundleService");
+    info!("🚀 Starting Shiroi Test Block Engine Server with BeProxyBundleService");
 
     let addr = SocketAddr::new(args.bind_ip, args.bind_port);
     info!("📍 Binding to: {}", addr);
@@ -301,18 +269,11 @@ async fn main() -> Result<()> {
 
     match Server::builder()
         .add_service(AuthServiceServer::new(AuthServiceImpl))
-        .add_service(
-            BeProxyBundleServiceServer::with_interceptor(
-                BeProxyServiceImpl,
-                AuthInterceptor,
-            )
-        )
+        .add_service(BeProxyBundleServiceServer::with_interceptor(BeProxyServiceImpl, AuthInterceptor))
         .serve(addr)
         .await
     {
-        Ok(_) => {
-            info!("✅ Server shutdown gracefully");
-        }
+        Ok(_) => { info!("✅ Server shutdown gracefully"); }
         Err(e) => {
             error!("❌ Server error: {}", e);
             return Err(e.into());

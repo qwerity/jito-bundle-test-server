@@ -1,8 +1,8 @@
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, Duration as StdDuration};
+use rand::Rng;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
-use rand::Rng;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, Duration as StdDuration};
 
 #[derive(Clone)]
 pub struct SolanaBlockhashFetcher {
@@ -24,7 +24,7 @@ impl SolanaBlockhashFetcher {
         rpc_url: String,
         skip_blockhash_fetching: bool,
         blockhash_update_interval_ms: u64
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Self, anyhow::Error> {
         let fetcher = Self::new_with_params(
             rpc_url,
             skip_blockhash_fetching,
@@ -74,7 +74,7 @@ impl SolanaBlockhashFetcher {
         *self.last_update.lock().unwrap() = SystemTime::now();
     }
 
-    pub async fn update_blockhash(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn update_blockhash(&self) -> Result<(), anyhow::Error> {
         if self.skip_rpc_fetch {
             let random_blockhash = Self::generate_random_blockhash();
             self.set_blockhash(random_blockhash);
@@ -89,7 +89,7 @@ impl SolanaBlockhashFetcher {
                     log::debug!("Updated Solana blockhash: {}", blockhash_str);
                     Ok(())
                 },
-                Err(e) => Err(Box::new(e))
+                Err(e) => Err(e.into())
             }
         }
     }

@@ -2,8 +2,22 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use crate::proto::{
     bundle::Bundle,
-    packet::PacketBatch
+    packet::PacketBatch,
+    packet::Packet,
 };
+
+fn update_packets_hash(packets: &[Packet], hasher: &mut DefaultHasher) {
+    for (index, packet) in packets.iter().enumerate() {
+        index.hash(hasher);
+        packet.data.hash(hasher);
+
+        if let Some(meta) = &packet.meta {
+            meta.size.hash(hasher);
+            meta.addr.hash(hasher);
+            meta.port.hash(hasher);
+        }
+    }
+}
 
 /// Calculate a deterministic hash for the bundle for verification purposes
 pub fn calculate_bundle_hash(bundle: &Bundle) -> String {
@@ -11,16 +25,7 @@ pub fn calculate_bundle_hash(bundle: &Bundle) -> String {
 
     bundle.packets.len().hash(&mut hasher);
 
-    for (index, packet) in bundle.packets.iter().enumerate() {
-        index.hash(&mut hasher);
-        packet.data.hash(&mut hasher);
-
-        if let Some(meta) = &packet.meta {
-            meta.size.hash(&mut hasher);
-            meta.addr.hash(&mut hasher);
-            meta.port.hash(&mut hasher);
-        }
-    }
+    update_packets_hash(&bundle.packets, &mut hasher);
 
     if let Some(header) = &bundle.header {
         if let Some(ts) = &header.ts {
@@ -38,16 +43,7 @@ pub fn calculate_packet_batch_hash(batch: &PacketBatch) -> String {
 
     batch.packets.len().hash(&mut hasher);
 
-    for (index, packet) in batch.packets.iter().enumerate() {
-        index.hash(&mut hasher);
-        packet.data.hash(&mut hasher);
-
-        if let Some(meta) = &packet.meta {
-            meta.size.hash(&mut hasher);
-            meta.addr.hash(&mut hasher);
-            meta.port.hash(&mut hasher);
-        }
-    }
+    update_packets_hash(&batch.packets, &mut hasher);
 
     format!("{:016x}", hasher.finish())
 }

@@ -1,7 +1,6 @@
 use bundle_test_server::{
     utils::{
         solana_blockhash_fetcher::SolanaBlockhashFetcher,
-        keypair_manager::KeypairManager,
         auth::AuthServiceImpl,
         hash_utils::{calculate_bundle_hash, calculate_packet_batch_hash}
     },
@@ -9,6 +8,7 @@ use bundle_test_server::{
         auth::auth_service_server::AuthServiceServer,
         block_engine::{
             BlockBuilderFeeInfoRequest, BlockBuilderFeeInfoResponse,
+            GetBlockEngineEndpointRequest, GetBlockEngineEndpointResponse,
             SubscribeBundlesRequest, SubscribeBundlesResponse,
             SubscribePacketsRequest, SubscribePacketsResponse,
             block_engine_validator_server::{BlockEngineValidator, BlockEngineValidatorServer}
@@ -22,13 +22,14 @@ use futures::stream;
 use futures_util::stream::Stream;
 use rand::{Rng, rng};
 use solana_compute_budget_interface::ComputeBudgetInstruction;
-use solana_keypair::{Pubkey, Signer};
+use solana_keypair::{Pubkey, Keypair, Signer, read_keypair_file};
 use solana_sdk::instruction::Instruction;
 use solana_sdk::transaction::Transaction;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration as StdDuration;
+use anyhow::anyhow;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, error, debug};
 use uuid::Uuid;
@@ -68,15 +69,16 @@ pub struct Args {
 #[derive(Clone)]
 pub struct BlockEngineValidatorService {
     blockhash_fetcher: SolanaBlockhashFetcher,
-    keypair: KeypairManager,
+    keypair: Arc<Keypair>,
     args: Args,
     bundle_counter: Arc<AtomicU64>,
 }
 
 impl BlockEngineValidatorService {
-    pub async fn new(args: Args) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let keypair = KeypairManager::load_from_file(&args.keypair_path).await?;
-        info!("Using keypair with public key: {}", keypair.get_public_key());
+    pub async fn new(args: Args) -> Result<Self, anyhow::Error> {
+        let keypair = read_keypair_file(&args.keypair_path)
+            .map_err(|e| anyhow!("{}: {e}", self.config.shiroi_block_engines.keypair_path))?;
+        info!("Using keypair with public key: {}", keypair.pubkey());
 
         let blockhash_fetcher = SolanaBlockhashFetcher::new(
             args.rpc_url.clone(),
@@ -86,16 +88,16 @@ impl BlockEngineValidatorService {
 
         Ok(Self {
             blockhash_fetcher,
-            keypair,
+            keypair: Arc::new(keypair),
             args,
             bundle_counter: Arc::new(AtomicU64::new(0)),
         })
     }
 
-    fn create_bundle(&self) -> Result<Bundle, Box<dyn std::error::Error + Send + Sync>> {
+    fn create_bundle(&self) -> Result<Bundle, anyhow::Error> {
         let blockhash = self.blockhash_fetcher.get_blockhash();
         if blockhash.is_empty() {
-            return Err("No blockhash available".into());
+            return Err(anyhow!("No blockhash available"));
         }
 
         let mut rng = rng();
@@ -117,7 +119,7 @@ impl BlockEngineValidatorService {
         })
     }
 
-    fn create_transfer_transaction(&self, amount_lamports: u64, recent_blockhash: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    fn create_transfer_transaction(&self, amount_lamports: u64, recent_blockhash: &str) -> Result<Vec<u8>, anyhow::Error> {
         let blockhash = recent_blockhash.parse()?;
         let instructions = vec![
             ComputeBudgetInstruction::set_compute_unit_limit(self.args.compute_unit_limit),
@@ -128,16 +130,16 @@ impl BlockEngineValidatorService {
                 data: format!("Transfer {} lamports", amount_lamports).into_bytes(),
             },
             solana_system_interface::instruction::transfer(
-                &self.keypair.keypair.pubkey(),
-                &self.keypair.keypair.pubkey(),
+                &self.keypair.pubkey(),
+                &self.keypair.pubkey(),
                 amount_lamports
             )
         ];
 
         let transaction = Transaction::new_signed_with_payer(
             &instructions,
-            Some(&self.keypair.keypair.pubkey()),
-            &[&self.keypair.keypair.as_ref()],
+            Some(&self.keypair.pubkey()),
+            &[&self.keypair],
             blockhash
         );
 
@@ -295,15 +297,19 @@ impl BlockEngineValidator for BlockEngineValidatorService {
     ) -> Result<Response<BlockBuilderFeeInfoResponse>, Status> {
         let response = BlockBuilderFeeInfoResponse {
             commission: 5,
-            pubkey: self.keypair.get_public_key(),
+            pubkey: self.keypair.pubkey().to_string(),
         };
 
         Ok(Response::new(response))
     }
+    async fn get_block_engine_endpoints(&self, _: Request<GetBlockEngineEndpointRequest>)
+        -> Result<Response<GetBlockEngineEndpointResponse>, Status> {
+        todo!()
+    }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
 
     tracing_subscriber::fmt()

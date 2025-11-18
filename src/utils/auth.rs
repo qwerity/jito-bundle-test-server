@@ -5,10 +5,10 @@ use crate::proto::auth::{
     RefreshAccessTokenRequest, RefreshAccessTokenResponse,
     Token,
 };
+use crate::utils::extract_client_addr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tonic::{Request, Response, Status, service::Interceptor};
 use tracing::{error, info, warn, debug};
-use crate::utils::extract_client_addr;
 
 #[derive(Clone)]
 pub struct AuthInterceptor;

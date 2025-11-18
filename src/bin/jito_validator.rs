@@ -1,6 +1,5 @@
 use bundle_test_server::{
     utils::{
-        keypair_manager::KeypairManager,
         hash_utils::{calculate_bundle_hash, calculate_packet_batch_hash}
     },
     proto::{
@@ -16,9 +15,10 @@ use bundle_test_server::{
 };
 use clap::Parser;
 use futures_util::StreamExt;
-use solana_keypair::Signer;
+use solana_keypair::{Keypair, Signer, read_keypair_file};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use anyhow::anyhow;
 use tonic::metadata::MetadataValue;
 use tonic::{transport::Channel, Request, Code};
 use tracing::{info, warn, error, debug};
@@ -43,28 +43,29 @@ pub struct Args {
 pub struct BundleClient {
     auth_client: AuthServiceClient<Channel>,
     block_engine_client: BlockEngineValidatorClient<Channel>,
-    keypair: KeypairManager,
+    keypair: Arc<Keypair>,
     access_token: Option<String>,
     bundle_counter: Arc<AtomicU64>,
 }
 
 impl BundleClient {
-    pub async fn new(server_addr: String, keypair_path: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let keypair = KeypairManager::load_from_file(&keypair_path).await?;
-        info!("Client using keypair with public key: {}", keypair.get_public_key());
+    pub async fn new(server_addr: String, keypair_path: String) -> Result<Self, anyhow::Error> {
+        let keypair = read_keypair_file(&keypair_path)
+            .map_err(|e| anyhow!("{}: {e}", self.config.shiroi_block_engines.keypair_path))?;
+        info!("Client using keypair with public key: {}", keypair.pubkey());
 
         let (auth_client, block_engine_client) = Self::create_clients(&server_addr).await?;
 
         Ok(Self {
             auth_client,
             block_engine_client,
-            keypair,
+            keypair: Arc::new(keypair),
             access_token: None,
             bundle_counter: Arc::new(AtomicU64::new(0)),
         })
     }
 
-    async fn create_clients(server_addr: &str) -> Result<(AuthServiceClient<Channel>, BlockEngineValidatorClient<Channel>), Box<dyn std::error::Error + Send + Sync>> {
+    async fn create_clients(server_addr: &str) -> Result<(AuthServiceClient<Channel>, BlockEngineValidatorClient<Channel>), anyhow::Error> {
         let uri = format!("http://{}", server_addr);
         let max_retries = 60;
 
@@ -84,7 +85,7 @@ impl BundleClient {
                         info!("Retrying in {} seconds...", 3);
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     } else {
-                        return Err(format!("Failed to connect after {} attempts: {}", max_retries, e).into());
+                        return Err(anyhow!("Failed to connect after {} attempts: {}", max_retries, e));
                     }
                 }
             }
@@ -93,7 +94,7 @@ impl BundleClient {
         unreachable!()
     }
 
-    async fn reconnect(&mut self, server_addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn reconnect(&mut self, server_addr: &str) -> Result<(), anyhow::Error> {
         info!("Reconnecting to server...");
         let (auth_client, block_engine_client) = Self::create_clients(server_addr).await?;
         self.auth_client = auth_client;
@@ -101,7 +102,7 @@ impl BundleClient {
         Ok(())
     }
 
-    pub async fn authenticate(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn authenticate(&mut self) -> Result<(), anyhow::Error> {
         let max_auth_retries = 60;
 
         for attempt in 1..=max_auth_retries {
@@ -118,7 +119,7 @@ impl BundleClient {
                         info!("Retrying authentication in {} seconds...", 3);
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     } else {
-                        return Err(format!("Authentication failed after {} attempts: {}", max_auth_retries, e).into());
+                        return Err(anyhow!("Authentication failed after {} attempts: {}", max_auth_retries, e));
                     }
                 }
             }
@@ -127,10 +128,10 @@ impl BundleClient {
         unreachable!()
     }
 
-    async fn try_authenticate(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn try_authenticate(&mut self) -> Result<(), anyhow::Error> {
         let challenge_request = GenerateAuthChallengeRequest {
             role: Role::Validator as i32,
-            pubkey: self.keypair.keypair.pubkey().to_bytes().to_vec(),
+            pubkey: self.keypair.pubkey().to_bytes().to_vec(),
         };
 
         let challenge_response = self.auth_client
@@ -140,12 +141,12 @@ impl BundleClient {
         let challenge = challenge_response.into_inner().challenge;
         debug!("Received challenge: {}", challenge);
 
-        let message_to_sign = format!("{}{}", self.keypair.get_public_key(), challenge);
-        let signature = self.keypair.keypair.sign_message(message_to_sign.as_bytes());
+        let message_to_sign = format!("{}{}", self.keypair.pubkey(), challenge);
+        let signature = self.keypair.sign_message(message_to_sign.as_bytes());
 
         let tokens_request = GenerateAuthTokensRequest {
             challenge,
-            client_pubkey: self.keypair.keypair.pubkey().to_bytes().to_vec(),
+            client_pubkey: self.keypair.pubkey().to_bytes().to_vec(),
             signed_challenge: signature.as_ref().to_vec(),
         };
 
@@ -159,7 +160,7 @@ impl BundleClient {
         Ok(())
     }
 
-    pub async fn subscribe_to_bundles(&mut self, server_addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn subscribe_to_bundles(&mut self, server_addr: String) -> Result<(), anyhow::Error> {
         let max_reconnect_attempts = 60;
         let mut reconnect_attempt = 0;
 
@@ -170,7 +171,7 @@ impl BundleClient {
                     error!("Authentication failed: {}", e);
                     reconnect_attempt += 1;
                     if reconnect_attempt >= max_reconnect_attempts {
-                        return Err(format!("Failed to authenticate after {} attempts", max_reconnect_attempts).into());
+                        return Err(anyhow!("Failed to authenticate after {} attempts", max_reconnect_attempts));
                     }
                     info!("Retrying authentication in 3 seconds...");
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -232,7 +233,7 @@ impl BundleClient {
 
             reconnect_attempt += 1;
             if reconnect_attempt >= max_reconnect_attempts {
-                return Err(format!("Failed to reconnect after {} attempts", max_reconnect_attempts).into());
+                return Err(anyhow!("Failed to reconnect after {} attempts", max_reconnect_attempts));
             }
 
             info!("Reconnection attempt {}/{} in 5 seconds...", reconnect_attempt, max_reconnect_attempts);
@@ -245,7 +246,7 @@ impl BundleClient {
         }
     }
 
-    pub async fn subscribe_to_packets(&mut self, server_addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn subscribe_to_packets(&mut self, server_addr: String) -> Result<(), anyhow::Error> {
         let max_reconnect_attempts = 60;
         let mut reconnect_attempt = 0;
         let mut packet_counter = 0u64;
@@ -257,7 +258,7 @@ impl BundleClient {
                     error!("Authentication failed: {}", e);
                     reconnect_attempt += 1;
                     if reconnect_attempt >= max_reconnect_attempts {
-                        return Err(format!("Failed to authenticate after {} attempts", max_reconnect_attempts).into());
+                        return Err(anyhow!("Failed to authenticate after {} attempts", max_reconnect_attempts));
                     }
                     info!("Retrying authentication in 3 seconds...");
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -315,7 +316,7 @@ impl BundleClient {
 
             reconnect_attempt += 1;
             if reconnect_attempt >= max_reconnect_attempts {
-                return Err(format!("Failed to reconnect after {} attempts", max_reconnect_attempts).into());
+                return Err(anyhow!("Failed to reconnect after {} attempts", max_reconnect_attempts));
             }
 
             info!("Reconnection attempt {}/{} in 5 seconds...", reconnect_attempt, max_reconnect_attempts);
@@ -330,7 +331,7 @@ impl BundleClient {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
 
     tracing_subscriber::fmt()
